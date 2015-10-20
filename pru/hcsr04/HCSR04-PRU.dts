@@ -1,10 +1,3 @@
-/* Device Tree Overlay for enabling the pins that are used in Chapter 13
-* This overlay is based on the BB-PRU-01 overlay
-* Written by Derek Molloy for the book "Exploring BeagleBone: Tools and 
-* Techniques for Building with Embedded Linux" by John Wiley & Sons, 2014
-* ISBN 9781118935125. Please see the file README.md in the repository root 
-* directory for copyright and GNU GPLv3 license information.
-*/
 /dts-v1/;
 /plugin/;
 
@@ -14,7 +7,6 @@
    part-number = "HCSR04-PRU";
    version = "00A0";
 
-   /* This overlay uses the following resources */
    exclusive-use =
          "P9.27", "P9.28", "pru0";
 
