@@ -3,6 +3,9 @@
 #include <prussdrv.h>
 #include <pruss_intc_mapping.h>
 
+#define USECS_DIV 100.0
+#define HCSR04_DIV 58.0
+
 int main()
 {
 	void *pru0_memory;
@@ -24,7 +27,7 @@ int main()
 	n = prussdrv_pru_wait_event(PRU_EVTOUT_0);
 	distance_samples = *pru0_memory_uint;
 
-	printf("Measured distance: %f cm\n", (float)distance_samples / (100.0 * 50.));
+	printf("Measured distance: %f cm\n", (float)distance_samples / (USECS_DIV * HCSR04_DIV));
 
 	prussdrv_pru_disable(0);
 	prussdrv_exit();
