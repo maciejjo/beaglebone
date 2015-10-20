@@ -1,0 +1,6 @@
+Always connect HCS04 to beaglebone via logical state converter, another way you probably damage some beaglebone GPIO pins.
+Before run program copy devicetree overlay(HCSR04-PRU-00A0.dtbo file) to /lib/firmware and load it to capemanager:
+cp HCSR04-PRU-00A0.dtbo /lib/firmware
+echo HCSR04-PRU > /sys/devices/bone_capemgr.9/slots #on my beaglebone black
+
+hcsr04 program must be executed as superuser.
