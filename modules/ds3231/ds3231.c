@@ -42,7 +42,7 @@ static void write_reg(struct i2c_client *client, char reg, char val)
 	};
 	buf_wr[0] = reg;
 	buf_wr[1] = val;
-	i2c_transfer(ds3231_i2c_client->adapter, msg, 1);
+	i2c_transfer(client->adapter, msg, 1);
 }
 
 static char read_reg(struct i2c_client *client, char reg)
