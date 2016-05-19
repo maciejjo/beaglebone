@@ -13,8 +13,13 @@
 static ssize_t pins_state_show(struct device *dev, struct device_attribute *attr, char *buf)
 {
 	struct i2c_client *client = to_i2c_client(dev);
-	unsigned int pins;
+	int pins;
 	pins = i2c_smbus_read_byte(client);
+	if(pins < 0)
+	{
+		printk(KERN_ERR "%s: %s: i2c_smbus_read_byte failed(%i)\n", DRIVER, __func__, pins);
+		return pins;
+	}
 	printk(KERN_INFO "%s: %s: addr: 0x%X\n", DRIVER, __func__, client->addr);
 	return sprintf(buf, "%X", pins);
 }
