@@ -5,7 +5,7 @@
 #include <linux/sysfs.h>
 #include <linux/hwmon-sysfs.h>
 
-#define COMPATIBLE "pcf8574sample"
+#define PCF8574 "pcf8574sample"
 #define DRIVER "PCF8574SAMPLE"
 
 //driver needs device tree entry in order to work, overlay need to be loaded
@@ -54,7 +54,7 @@ static struct attribute *pcf8574_attr[] = {
 };
 
 static const struct attribute_group pcf8574_attr_group = {
-	.name = COMPATIBLE,
+	.name = PCF8574,
 	.attrs = pcf8574_attr,
 };
 
@@ -79,7 +79,7 @@ static int pcf8574_remove(struct i2c_client *client)
 }
 
 static const struct i2c_device_id pcf8574_id[] = {
-	{COMPATIBLE, 0},
+	{PCF8574, 0},
 	{},
 };
 
@@ -93,7 +93,27 @@ static struct i2c_driver pcf8574_i2c_driver = {
 	.remove = pcf8574_remove,
 };
 
-module_i2c_driver(pcf8574_i2c_driver);
+static int __init pcf8574_init(void)
+{
+	int err;
+
+	err = i2c_add_driver(&pcf8574_i2c_driver);
+	if(err)
+	{
+		printk(KERN_ERR "%s: %s: cannot add i2c driver(%i)\n", DRIVER, __func__, err);
+		return err;
+	}
+
+	return 0;
+}
+
+static void __exit pcf8574_exit(void)
+{
+	i2c_del_driver(&pcf8574_i2c_driver);
+}
+
+module_init(pcf8574_init);
+module_exit(pcf8574_exit);
 
 MODULE_DEVICE_TABLE(i2c, pcf8574_id);
 
