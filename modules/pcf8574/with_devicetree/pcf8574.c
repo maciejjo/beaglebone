@@ -2,9 +2,7 @@
 #include <linux/init.h>
 #include <linux/slab.h>
 #include <linux/i2c.h>
-#include <linux/sysfs.h>
 #include <linux/fs.h>
-#include <linux/hwmon-sysfs.h>
 
 #define PCF8574 "pcf8574sample"
 #define DRIVER "PCF8574SAMPLE"
