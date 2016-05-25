@@ -1,0 +1,25 @@
+Example DT node for this driver (BeagleBone Black):
+
+/ {
+        ocp {
+                servo_P9_16 {
+                        compatible      = "pwm_servo";
+                        pwms            = <&ehrpwm1 1 20000000 1>;
+                        pwm-names       = "PWM_P9_16";
+                        pinctrl-names   = "default";
+                        pinctrl-0       = <&pwm_P9_16>;
+                        enabled         = <0>;
+                        duty            = <0>;
+                        status          = "okay";
+                };
+        };
+};
+
+To configure selected pin to PWM:
+
+&am33xx_pinmux {
+        pwm_P9_16: pinmux_pwm_P9_16_pins {
+                pinctrl-single,pins = <0x04c  0x6>; /* P9_16 (ZCZ ball T14) | MODE 6 */
+        };
+};
+
