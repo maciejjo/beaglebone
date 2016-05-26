@@ -1,317 +1,458 @@
-#include <linux/init.h>
 #include <linux/module.h>
-#include <linux/fs.h>
 #include <linux/device.h>
-#include <linux/gpio.h>
+#include <linux/platform_device.h>
+#include <linux/of.h>
+#include <linux/pinctrl/consumer.h>
+#include <linux/gpio/consumer.h>
 #include <linux/pwm.h>
-#include <linux/string.h>
 
-#define DRVNAME "TB6612"
-
-#define AIN1  66
-#define AIN2  69
-#define BIN1  47
-#define BIN2  27
-#define STDBY 45
-#define PWMA   6 /* P8_13 */
-#define PWMB   5 /* P8_19 */
 #define MOTOR_PWM_PERIOD 10000000
 #define MOTOR_PWM_DUTY_MUL 100000
-#define MODE_SIZE 5
 
-static unsigned int motora_speed = 0, motorb_speed = 0;
-static char motora_mode[MODE_SIZE], motorb_mode[MODE_SIZE];
-static unsigned char standby = 1;
-static struct class *tb6612_class;
-static struct pwm_device *motora_pwm;
-static struct pwm_device *motorb_pwm;
+enum motor_mode {
+	MOTOR_MODE_CW,
+	MOTOR_MODE_CCW,
+	MOTOR_MODE_STOP
+};
 
-/* show and store functions declarations */
-static ssize_t motora_speed_show(struct class *cls, struct class_attribute *attr, char *buf);
-static ssize_t motora_speed_store(struct class *cls, struct class_attribute *attr, const char *buf, size_t count);
-static ssize_t motora_mode_show(struct class *cls, struct class_attribute *attr, char *buf);
-static ssize_t motora_mode_store(struct class *cls, struct class_attribute *attr, const char *buf, size_t count);
+/* struct motor_data
+ *
+ * Describe resources associated with single motor.
+ *
+ * speed_pwm - PWM signal driving motor speed
+ * in1_gpio, in2_gpio - GPIO signals for setting motor direction
+ * speed - variable to store current speed
+ * mode -  variable to store motor mode (cw, ccw, stop)
+ */
 
-static ssize_t motorb_speed_show(struct class *cls, struct class_attribute *attr, char *buf);
-static ssize_t motorb_speed_store(struct class *cls, struct class_attribute *attr, const char *buf, size_t count);
-static ssize_t motorb_mode_show(struct class *cls, struct class_attribute *attr, char *buf);
-static ssize_t motorb_mode_store(struct class *cls, struct class_attribute *attr, const char *buf, size_t count);
+struct motor_data {
+	struct pwm_device *speed_pwm;
+	struct gpio_desc *in1_gpio;
+	struct gpio_desc *in2_gpio;
+	unsigned int speed;
+	enum motor_mode mode;
+};
 
-static ssize_t tb6612_standby_show(struct class *cls, struct class_attribute *attr, char *buf);
-static ssize_t tb6612_standby_store(struct class *cls, struct class_attribute *attr, const char *buf, size_t count);
+/* struct tb6612_data
+ *
+ * Describe resources associated with whole chip.
+ *
+ * motor_a, motor_b - data associated with each motor
+ * standby - field describing standby state
+ * standby_gpio - GPIO for setting standby state
+ *
+ */
 
-/* attributes */
-static struct class_attribute motora_speed_attr = __ATTR(motora_speed, 0660, motora_speed_show, motora_speed_store);
-static struct class_attribute motorb_speed_attr = __ATTR(motorb_speed, 0660, motorb_speed_show, motorb_speed_store);
-static struct class_attribute motora_mode_attr = __ATTR(motora_mode, 0660, motora_mode_show, motora_mode_store);
-static struct class_attribute motorb_mode_attr = __ATTR(motorb_mode, 0660, motorb_mode_show, motorb_mode_store);
-static struct class_attribute tb6612_standby_attr = __ATTR(standby, 0660, tb6612_standby_show, tb6612_standby_store);
+struct tb6612_data {
+	struct motor_data motor_a;
+	struct motor_data motor_b;
+	unsigned char standby;
+	struct gpio_desc *standby_gpio;
+};
 
-static ssize_t motora_speed_show(struct class *cls, struct class_attribute *attr, char *buf)
+static ssize_t tb6612_show_motor_a_speed(struct device *dev,
+	struct device_attribute *attr, char *buf)
 {
-	return sprintf(buf, "%u", motora_speed);
+	struct tb6612_data *data =
+		platform_get_drvdata(to_platform_device(dev));
+
+	return sprintf(buf, "%u\n", data->motor_a.speed);
 }
 
-static ssize_t motora_speed_store(struct class *cls, struct class_attribute *attr, const char *buf, size_t count)
+static ssize_t tb6612_store_motor_a_speed(struct device *dev,
+	struct device_attribute *attr, const char *buf, size_t count)
 {
-	unsigned int tmp;
-	sscanf(buf, "%u", &tmp);
-	if(tmp < 0 || tmp > 100)return -EINVAL;
-	motora_speed = tmp;
-	pwm_config(motora_pwm, motora_speed * MOTOR_PWM_DUTY_MUL, MOTOR_PWM_PERIOD);
+	unsigned long tmp;
+	int error;
+	struct tb6612_data *data =
+		platform_get_drvdata(to_platform_device(dev));
+
+	error = kstrtoul(buf, 10, &tmp);
+
+	if (tmp < 0 || tmp > 100)
+		return -EINVAL;
+
+	error = pwm_config(data->motor_a.speed_pwm, tmp * MOTOR_PWM_DUTY_MUL,
+			MOTOR_PWM_PERIOD);
+	if (error < 0)
+		return error;
+
+	data->motor_a.speed = tmp;
+
 	return count;
 }
 
-static ssize_t motorb_speed_show(struct class *cls, struct class_attribute *attr, char *buf)
+static ssize_t tb6612_show_motor_b_speed(struct device *dev,
+	struct device_attribute *attr, char *buf)
 {
-	return sprintf(buf, "%u", motorb_speed);
+	struct tb6612_data *data =
+		platform_get_drvdata(to_platform_device(dev));
+
+	return sprintf(buf, "%u\n", data->motor_b.speed);
 }
 
-static ssize_t motorb_speed_store(struct class *cls, struct class_attribute *attr, const char *buf, size_t count)
+static ssize_t tb6612_store_motor_b_speed(struct device *dev,
+	struct device_attribute *attr, const char *buf, size_t count)
 {
-	unsigned int tmp;
-	sscanf(buf, "%u", &tmp);
-	if(tmp < 0 || tmp > 100)return -EINVAL;
-	motorb_speed = tmp;
-	pwm_config(motorb_pwm, motorb_speed * MOTOR_PWM_DUTY_MUL, MOTOR_PWM_PERIOD);
+	unsigned long tmp;
+	int error;
+	struct tb6612_data *data =
+		platform_get_drvdata(to_platform_device(dev));
+
+	error = kstrtoul(buf, 10, &tmp);
+
+	if (tmp < 0 || tmp > 100)
+		return -EINVAL;
+
+	error = pwm_config(data->motor_b.speed_pwm, tmp * MOTOR_PWM_DUTY_MUL,
+			MOTOR_PWM_PERIOD);
+	if (error < 0)
+		return error;
+
+	data->motor_b.speed = tmp;
+
 	return count;
 }
 
-
-static ssize_t motora_mode_show(struct class *cls, struct class_attribute *attr, char *buf)
+static ssize_t tb6612_show_motor_a_mode(struct device *dev,
+	struct device_attribute *attr, char *buf)
 {
-	return sprintf(buf, "%s", motora_mode);
+	struct tb6612_data *data =
+		platform_get_drvdata(to_platform_device(dev));
+
+	switch (data->motor_a.mode) {
+
+	case MOTOR_MODE_CW:
+		return sprintf(buf, "cw\n");
+	case MOTOR_MODE_CCW:
+		return sprintf(buf, "ccw\n");
+	case MOTOR_MODE_STOP:
+		return sprintf(buf, "stop\n");
+	default:
+		return -EINVAL;
+
+	}
+
+
 }
 
-static ssize_t motora_mode_store(struct class *cls, struct class_attribute *attr, const char *buf, size_t count)
+static ssize_t tb6612_store_motor_a_mode(struct device *dev,
+	struct device_attribute *attr, const char *buf, size_t count)
+
+
 {
-	int len;
-	len = strlen(buf);
-	if(buf[len - 1] == '\n')len--;
-	if(len > 4)return -EINVAL;
-	if(strncmp(buf, "stop", len) != 0 && strncmp(buf, "cw", len) != 0 && strncmp(buf, "ccw", len) != 0)return -EINVAL;
-	memset(motora_mode, '\0', MODE_SIZE);
-	strncpy(motora_mode, buf, len);
-	if(strcmp(motora_mode, "stop") == 0){
-		gpio_set_value(AIN1, 0);
-		gpio_set_value(AIN2, 0);
+	struct tb6612_data *data =
+		platform_get_drvdata(to_platform_device(dev));
+
+	dev_err(dev, "buffer is %s\n", buf);
+
+	if (strncmp(buf, "stop", strlen("stop")) == 0) {
+
+		gpiod_set_value(data->motor_a.in1_gpio, 0);
+		gpiod_set_value(data->motor_a.in2_gpio, 0);
+		data->motor_a.mode = MOTOR_MODE_STOP;
+
+	} else if (strncmp(buf, "cw", strlen("cw")) == 0) {
+
+		gpiod_set_value(data->motor_a.in1_gpio, 0);
+		gpiod_set_value(data->motor_a.in2_gpio, 1);
+		data->motor_a.mode = MOTOR_MODE_CW;
+
+	} else if (strncmp(buf, "ccw", strlen("ccw")) == 0) {
+
+		gpiod_set_value(data->motor_a.in1_gpio, 1);
+		gpiod_set_value(data->motor_a.in2_gpio, 0);
+		data->motor_a.mode = MOTOR_MODE_CCW;
+
+	} else {
+
+		return -EINVAL;
+
 	}
-	else if(strcmp(motora_mode, "cw") == 0){
-		gpio_set_value(AIN1, 0);
-		gpio_set_value(AIN2, 1);
-	}
-	else if(strcmp(motora_mode, "ccw") == 0){
-		gpio_set_value(AIN1, 1);
-		gpio_set_value(AIN2, 0);
-	}
-	else return -EINVAL;
+
 	return count;
 }
 
-static ssize_t motorb_mode_show(struct class *cls, struct class_attribute *attr, char *buf)
+static ssize_t tb6612_show_motor_b_mode(struct device *dev,
+	struct device_attribute *attr, char *buf)
 {
-	return sprintf(buf, "%s", motorb_mode);
+	struct tb6612_data *data =
+		platform_get_drvdata(to_platform_device(dev));
+
+	switch (data->motor_b.mode) {
+
+	case MOTOR_MODE_CW:
+		return sprintf(buf, "cw\n");
+	case MOTOR_MODE_CCW:
+		return sprintf(buf, "ccw\n");
+	case MOTOR_MODE_STOP:
+		return sprintf(buf, "stop\n");
+	default:
+		return -EINVAL;
+
+	}
 }
 
-static ssize_t motorb_mode_store(struct class *cls, struct class_attribute *attr, const char *buf, size_t count)
+static ssize_t tb6612_store_motor_b_mode(struct device *dev,
+	struct device_attribute *attr, const char *buf, size_t count)
+
+
 {
-	int len;
-	len = strlen(buf);
-	if(buf[len - 1] == '\n')len--;
-	if(len > 4)return -EINVAL;
-	if(strncmp(buf, "stop", len) != 0 && strncmp(buf, "cw", len) != 0 && strncmp(buf, "ccw", len) != 0)return -EINVAL;
-	memset(motorb_mode, '\0', MODE_SIZE);
-	strncpy(motorb_mode, buf, len);
-	if(strcmp(motorb_mode, "stop") == 0){
-		gpio_set_value(BIN1, 0);
-		gpio_set_value(BIN2, 0);
+	struct tb6612_data *data =
+		platform_get_drvdata(to_platform_device(dev));
+
+	if (strncmp(buf, "stop", strlen("stop")) == 0) {
+
+		gpiod_set_value(data->motor_b.in1_gpio, 0);
+		gpiod_set_value(data->motor_b.in2_gpio, 0);
+		data->motor_b.mode = MOTOR_MODE_STOP;
+
+	} else if (strncmp(buf, "cw", strlen("cw")) == 0) {
+
+		gpiod_set_value(data->motor_b.in1_gpio, 0);
+		gpiod_set_value(data->motor_b.in2_gpio, 1);
+		data->motor_b.mode = MOTOR_MODE_CW;
+
+	} else if (strncmp(buf, "ccw", strlen("ccw")) == 0) {
+
+		gpiod_set_value(data->motor_b.in1_gpio, 1);
+		gpiod_set_value(data->motor_b.in2_gpio, 0);
+		data->motor_b.mode = MOTOR_MODE_CCW;
+
+	} else {
+
+		return -EINVAL;
+
 	}
-	else if(strcmp(motorb_mode, "cw") == 0){
-		gpio_set_value(BIN1, 0);
-		gpio_set_value(BIN2, 1);
-	}
-	else if(strcmp(motorb_mode, "ccw") == 0){
-		gpio_set_value(BIN1, 1);
-		gpio_set_value(BIN2, 0);
-	}
-	else return -EINVAL;
+
 	return count;
-
 }
 
-
-static ssize_t tb6612_standby_show(struct class *cls, struct class_attribute *attr, char *buf)
+static ssize_t tb6612_show_suspend(struct device *dev,
+	struct device_attribute *attr, char *buf)
 {
-	return sprintf(buf, "%i", standby);
+	struct tb6612_data *data =
+		platform_get_drvdata(to_platform_device(dev));
+
+	return sprintf(buf, "%i\n", data->standby);
 }
 
-static ssize_t tb6612_standby_store(struct class *cls, struct class_attribute *attr, const char *buf, size_t count)
+static ssize_t tb6612_store_suspend(struct device *dev,
+	struct device_attribute *attr, const char *buf, size_t count)
 {
-	unsigned int tmp;
-	sscanf(buf, "%u", &tmp);
-	if(tmp > 1)tmp = 1;
-	standby = tmp;
-	gpio_set_value(STDBY, !standby);
+	unsigned long tmp;
+	int error;
+	struct tb6612_data *data =
+		platform_get_drvdata(to_platform_device(dev));
+
+	error = kstrtoul(buf, 10, &tmp);
+
+	if (tmp > 1)
+		return -EINVAL;
+
+	/* Chip has reverse standby logic, need to negate */
+	gpiod_set_value(data->standby_gpio, !tmp);
+
+	data->standby = tmp;
+
 	return count;
 }
 
-static int __init tb6612_init(void)
+static DEVICE_ATTR(motor_a_speed, S_IWUSR | S_IRUGO, tb6612_show_motor_a_speed,
+		tb6612_store_motor_a_speed);
+
+static DEVICE_ATTR(motor_a_mode, S_IWUSR | S_IRUGO, tb6612_show_motor_a_mode,
+		tb6612_store_motor_a_mode);
+
+static DEVICE_ATTR(motor_b_speed, S_IWUSR | S_IRUGO, tb6612_show_motor_b_speed,
+		tb6612_store_motor_b_speed);
+
+static DEVICE_ATTR(motor_b_mode, S_IWUSR | S_IRUGO, tb6612_show_motor_b_mode,
+		tb6612_store_motor_b_mode);
+
+static DEVICE_ATTR(suspend, S_IWUSR | S_IRUGO, tb6612_show_suspend,
+		tb6612_store_suspend);
+
+static struct attribute *tb6612_attributes[] = {
+	&dev_attr_motor_a_speed.attr,
+	&dev_attr_motor_a_mode.attr,
+	&dev_attr_motor_b_speed.attr,
+	&dev_attr_motor_b_mode.attr,
+	&dev_attr_suspend.attr,
+	NULL,
+};
+
+static const struct attribute_group tb6612_group = {
+	.attrs = tb6612_attributes,
+};
+
+
+static int tb6612_probe(struct platform_device *pdev)
 {
-	/* create entried in sysfs */
-	tb6612_class = class_create(THIS_MODULE, "tb6612");
-	if(tb6612_class == NULL){
-		printk(KERN_ERR "%s: Cannot create entry in sysfs", DRVNAME);
-		return -1;
-	}
-	
-	if(class_create_file(tb6612_class, &motora_speed_attr) != 0){
-		printk(KERN_ERR "%s: Cannot create sysfs attribute\n", DRVNAME);
-		goto err1;
-	}
-	
-	if(class_create_file(tb6612_class, &motorb_speed_attr) != 0){
-		printk(KERN_ERR "%s: Cannot create sysfs attribute\n", DRVNAME);
-		goto err2;
-	}
-	if(class_create_file(tb6612_class, &motora_mode_attr) != 0){
-		printk(KERN_ERR "%s: Cannot create sysfs attribute\n", DRVNAME);
-		goto err3;
-	}
-	if(class_create_file(tb6612_class, &motorb_mode_attr) != 0){
-		printk(KERN_ERR "%s: Cannot create sysfs attribute\n", DRVNAME);
-		goto err4;
-	}
-	if(class_create_file(tb6612_class, &tb6612_standby_attr) != 0){
-		printk(KERN_ERR "%s: Cannot create sysfs attribute\n", DRVNAME);
-		goto err5;
-	}
-	
-	/* configure gpio and pwm outputs */
-	/* Motor A direction regulation */
-	gpio_request(AIN1, "motora_in1");
-	gpio_direction_output(AIN1, 0);
-	gpio_export(AIN1, 0);
+	struct device *dev = &pdev->dev;
+	struct pinctrl *pinctrl;
+	struct device_node *node = dev->of_node;
+	struct tb6612_data *data;
+	int error = 0;
 
-	gpio_request(AIN2, "motora_in2");
-	gpio_direction_output(AIN2, 0);
-	gpio_export(AIN2, 0);
+	dev_err(dev, "Im in probe motha fucka :)\n");
 
-	/* Motor B direction regulation */
-	gpio_request(BIN1, "motorb_in1");
-	gpio_direction_output(BIN1, 0);
-	gpio_export(BIN1, 0);
-
-	gpio_request(BIN2, "motorb_in2");
-	gpio_direction_output(BIN2, 0);
-	gpio_export(BIN2, 0);
-
-	/* Standby regulation */
-	gpio_request(STDBY, "standby");
-	gpio_direction_output(STDBY, !standby);
-	gpio_export(STDBY, 0);
-
-	/* Motor A speed regulation */
-	motora_pwm = pwm_request(PWMA, "motora_pwm");
-	if(motora_pwm == NULL)
-	{
-		printk(KERN_ERR "%s: Cannot use PWM output P8_13\n", DRVNAME);
-		goto err6;
+	if (node == NULL) {
+		dev_err(dev, "Non DT platforms not supported\n");
+		return -EINVAL;
 	}
-	pwm_config(motora_pwm, motora_speed * MOTOR_PWM_DUTY_MUL, MOTOR_PWM_PERIOD);
-	pwm_set_polarity(motora_pwm, PWM_POLARITY_NORMAL);
-	pwm_enable(motora_pwm);
-	
-	/* Motor B speed regulation */
-	motorb_pwm = pwm_request(PWMB, "motorb_pwm");
-	if(motorb_pwm == NULL)
-	{
-		printk(KERN_ERR "%s: Cannot use PWM output P8_19\n", DRVNAME);
-		goto err7;
+
+	data = devm_kzalloc(&pdev->dev, sizeof(*data), GFP_KERNEL);
+	if (!data)
+		return -ENOMEM;
+
+	/* Select pins that are in use */
+
+	pinctrl = devm_pinctrl_get_select_default(&pdev->dev);
+	if (IS_ERR(pinctrl))
+		dev_warn(&pdev->dev, "Unable to select pin group\n");
+
+	/* Configure PWMs for both motors" */
+
+	data->motor_a.speed_pwm = devm_pwm_get(&pdev->dev, "motor_a");
+	if (IS_ERR(data->motor_a.speed_pwm)) {
+		dev_err(&pdev->dev, "devm_pwm_get() failed\n");
+		return error;
 	}
-	pwm_config(motorb_pwm, motorb_speed * MOTOR_PWM_DUTY_MUL, MOTOR_PWM_PERIOD);
-	pwm_set_polarity(motorb_pwm, PWM_POLARITY_NORMAL);
-	pwm_enable(motorb_pwm);
-	
-	/* current mode of motors  */
-	strcpy(motora_mode, "stop");
-	strcpy(motorb_mode, "stop");
+
+	error = pwm_config(data->motor_a.speed_pwm, 0, MOTOR_PWM_PERIOD);
+	if (error) {
+		dev_err(&pdev->dev, "pwm_config() failed\n");
+		return error;
+	}
+
+	error = pwm_set_polarity(data->motor_a.speed_pwm, PWM_POLARITY_NORMAL);
+	if (error) {
+		dev_err(&pdev->dev, "pwm_set_polarity() failed\n");
+		return error;
+	}
+
+	error = pwm_enable(data->motor_a.speed_pwm);
+	if (error) {
+		dev_err(&pdev->dev, "pwm_enable() failed\n");
+		return error;
+	}
+
+	data->motor_b.speed_pwm = devm_pwm_get(&pdev->dev, "motor_b");
+	if (IS_ERR(data->motor_b.speed_pwm)) {
+		dev_err(&pdev->dev, "devm_pwm_get() failed\n");
+		return error;
+	}
+
+	error = pwm_config(data->motor_b.speed_pwm, 0, MOTOR_PWM_PERIOD);
+	if (error) {
+		dev_err(&pdev->dev, "pwm_config() failed\n");
+		return error;
+	}
+
+	error = pwm_set_polarity(data->motor_b.speed_pwm, PWM_POLARITY_NORMAL);
+	if (error) {
+		dev_err(&pdev->dev, "pwm_set_polarity() failed\n");
+		return error;
+	}
+
+
+	error = pwm_enable(data->motor_b.speed_pwm);
+	if (error) {
+		dev_err(&pdev->dev, "pwm_enable() failed\n");
+		return error;
+	}
+
+	/* Configure GPIOs */
+
+	data->motor_a.in1_gpio = devm_gpiod_get(&pdev->dev,
+			"ain1", GPIOD_OUT_LOW);
+	if (IS_ERR(data->motor_a.in1_gpio)) {
+		dev_err(&pdev->dev, "devm_gpiod_get() failed\n");
+		return error;
+	}
+
+	data->motor_a.in2_gpio = devm_gpiod_get(&pdev->dev,
+			"ain2", GPIOD_OUT_LOW);
+	if (IS_ERR(data->motor_a.in1_gpio)) {
+		dev_err(&pdev->dev, "devm_gpiod_get() failed\n");
+		return error;
+	}
+
+	data->motor_b.in1_gpio = devm_gpiod_get(&pdev->dev,
+			"bin1", GPIOD_OUT_LOW);
+	if (IS_ERR(data->motor_b.in1_gpio)) {
+		dev_err(&pdev->dev, "devm_gpiod_get() failed\n");
+		return error;
+	}
+
+	data->motor_b.in2_gpio = devm_gpiod_get(&pdev->dev,
+			"bin2", GPIOD_OUT_LOW);
+	if (IS_ERR(data->motor_b.in1_gpio)) {
+		dev_err(&pdev->dev, "devm_gpiod_get() failed\n");
+		return error;
+	}
+
+	data->standby_gpio = devm_gpiod_get(&pdev->dev, "stby", GPIOD_OUT_LOW);
+	if (IS_ERR(data->motor_b.in1_gpio)) {
+		dev_err(&pdev->dev, "devm_gpiod_get() failed\n");
+		return error;
+	}
+
+	platform_set_drvdata(pdev, data);
+
+	error = sysfs_create_group(&pdev->dev.kobj, &tb6612_group);
+	if (error) {
+		dev_err(&pdev->dev, "sysfs_create_group() failed (%d)\n",
+				error);
+		return error;
+	}
+
+	/* Set initial values */
+
+
 
 	return 0;
-	err7:
-	pwm_config(motora_pwm, 0, 0);
-	pwm_disable(motora_pwm);
-	pwm_free(motora_pwm);
-	err6:
-	gpio_set_value(STDBY, 0);
-	gpio_unexport(STDBY);
-	gpio_free(STDBY);
-	gpio_set_value(BIN2, 0);
-	gpio_unexport(BIN2);
-	gpio_free(BIN2);
-	gpio_set_value(BIN1, 0);
-	gpio_unexport(BIN1);
-	gpio_free(BIN1);
-	gpio_set_value(AIN2, 0);
-	gpio_unexport(AIN2);
-	gpio_free(AIN2);
-	gpio_set_value(AIN1, 0);
-	gpio_unexport(AIN1);
-	gpio_free(AIN1);
-	class_remove_file(tb6612_class, &tb6612_standby_attr);
-	err5:
-	class_remove_file(tb6612_class, &motorb_mode_attr);
-	err4:
-	class_remove_file(tb6612_class, &motora_mode_attr);
-	err3:
-	class_remove_file(tb6612_class, &motorb_speed_attr);
-	err2:
-	class_remove_file(tb6612_class, &motora_speed_attr);
-	err1:
-	class_destroy(tb6612_class);
-	return -1;
 }
 
-static void __exit tb6612_exit(void)
+static int tb6612_remove(struct platform_device *pdev)
 {
-	pwm_config(motorb_pwm, 0, 0);
-	pwm_disable(motorb_pwm);
-	pwm_free(motorb_pwm);
+	struct tb6612_data *data = platform_get_drvdata(pdev);
 
-	pwm_config(motora_pwm, 0, 0);
-	pwm_disable(motora_pwm);
-	pwm_free(motora_pwm);
+	pwm_disable(data->motor_a.speed_pwm);
+	pwm_disable(data->motor_b.speed_pwm);
 
-	gpio_set_value(STDBY, 0);
-	gpio_unexport(STDBY);
-	gpio_free(STDBY);
+	gpiod_set_value(data->motor_a.in1_gpio, 0);
+	gpiod_set_value(data->motor_a.in2_gpio, 0);
+	gpiod_set_value(data->motor_b.in1_gpio, 0);
+	gpiod_set_value(data->motor_b.in2_gpio, 0);
+	gpiod_set_value(data->standby_gpio, 0);
 
-	gpio_set_value(BIN2, 0);
-	gpio_unexport(BIN2);
-	gpio_free(BIN2);
+	sysfs_remove_group(&pdev->dev.kobj, &tb6612_group);
 
-	gpio_set_value(BIN1, 0);
-	gpio_unexport(BIN1);
-	gpio_free(BIN1);
-
-	gpio_set_value(AIN2, 0);
-	gpio_unexport(AIN2);
-	gpio_free(AIN2);
-
-	gpio_set_value(AIN1, 0);
-	gpio_unexport(AIN1);
-	gpio_free(AIN1);
-
-	class_remove_file(tb6612_class, &tb6612_standby_attr);
-	class_remove_file(tb6612_class, &motorb_mode_attr);
-	class_remove_file(tb6612_class, &motora_mode_attr);
-	class_remove_file(tb6612_class, &motorb_speed_attr);
-	class_remove_file(tb6612_class, &motora_speed_attr);
-	class_destroy(tb6612_class);
+	return 0;
 }
 
-module_init(tb6612_init);
-module_exit(tb6612_exit);
+#ifdef CONFIG_OF
+static const struct of_device_id tb6612_match[] = {
+	{ .compatible = "toshiba,tb6612fng", },
+	{ },
+};
+MODULE_DEVICE_TABLE(of, tb6612_match);
+#endif
 
-MODULE_AUTHOR("Adam Olek");
-MODULE_DESCRIPTION("TB6612 H-bridge driver");
+static struct platform_driver tb6612_driver = {
+	.probe	= tb6612_probe,
+	.remove = tb6612_remove,
+	.driver = {
+		.name	= "tb6612",
+#ifdef CONFIG_OF
+		.of_match_table = of_match_ptr(tb6612_match),
+#endif
+	},
+};
+module_platform_driver(tb6612_driver);
+
+MODULE_AUTHOR("Adam Olek, Maciej Sobkowski <maciejjo@maciejjo.pl");
+MODULE_DESCRIPTION("Toshiba TB6612FNG Driver IC for Dual DC motor");
 MODULE_LICENSE("GPL");
